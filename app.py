@@ -3,14 +3,13 @@ import sqlite3
 import os
 import ollama
 
-# --- 1. Auto-Initializing Database & RAG Engine ---
+# --- 1. Precise Word-Matching SQLite Engine & RAG ---
 def init_db():
-    """Ensures subject.db and the qa_data table always exist with default study content."""
+    """Ensures subject.db and the qa_data table always exist with an expanded study dataset."""
     db_path = "subject.db"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # Create table if it doesn't exist
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS qa_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,23 +19,36 @@ def init_db():
         )
     ''')
     
-    # Seed default sample data if table is empty
     cursor.execute("SELECT COUNT(*) FROM qa_data")
-    if cursor.fetchone()[0] == 0:
-        default_data = [
-            ("Computer Science", "what is a computer", "A computer is an electronic device that accepts data as input, processes it according to stored instructions, and produces information as output. It consists of both hardware and software."),
-            ("Computer Science", "define hardware", "Hardware refers to the physical, tangible parts of a computer system that you can touch and see. Examples include the Central Processing Unit (CPU), monitor, keyboard, mouse, and hard drive."),
-            ("Computer Science", "what is software", "Software is a set of instructions, data, or programs used to operate computers and execute specific tasks. It is the intangible part of the computer, such as operating systems and applications."),
-            ("Computer Science", "what is an operating system", "An operating system (OS) is system software that manages computer hardware, software resources, and provides common services for computer programs, such as Windows, macOS, and Linux.")
-        ]
-        cursor.executemany("INSERT INTO qa_data (subject, input, output) VALUES (?, ?, ?)", default_data)
+    count = cursor.fetchone()[0]
+    
+    expanded_data = [
+        ("Computer Science", "what is a computer", "A computer is an electronic device that accepts data as input, processes it according to stored instructions, and produces information as output. It consists of both hardware and software."),
+        ("Computer Science", "define hardware", "Hardware refers to the physical, tangible parts of a computer system that you can touch and see. Examples include the Central Processing Unit (CPU), monitor, keyboard, mouse, and hard drive."),
+        ("Computer Science", "what is software", "Software is a set of instructions, data, or programs used to operate computers and execute specific tasks. It is the intangible part of the computer, such as operating systems and applications."),
+        ("Computer Science", "what is an operating system", "An operating system (OS) is system software that manages computer hardware, software resources, and provides common services for computer programs, such as Windows, macOS, Linux, and Android."),
+        ("Computer Science", "what are input devices", "Input devices are hardware components used to feed data and control signals into a computer. Common examples include the keyboard, mouse, scanner, microphone, and digital camera."),
+        ("Computer Science", "what are output devices", "Output devices are hardware components that display or reproduce processed data from the computer to the user. Examples include the monitor (screen), printer, speakers, and projector."),
+        ("Computer Science", "what is the cpu", "The Central Processing Unit (CPU) is known as the 'brain' of the computer. It fetches instructions from memory, decodes them, and executes calculations or processing tasks."),
+        ("Computer Science", "what is memory", "Computer memory is used to store data and instructions temporarily or permanently. Primary memory includes RAM (Random Access Memory, volatile) and ROM (Read-Only Memory, non-volatile)."),
+        ("Computer Science", "what is the internet", "The internet is a global system of interconnected computer networks that use the standard Internet Protocol (TCP/IP) to link devices worldwide, enabling data sharing and communication.")
+    ]
+    
+    if count == 0:
+        cursor.executemany("INSERT INTO qa_data (subject, input, output) VALUES (?, ?, ?)", expanded_data)
         conn.commit()
-        
+    else:
+        for item in expanded_data:
+            cursor.execute("SELECT COUNT(*) FROM qa_data WHERE LOWER(input) = ?", (item[1].lower(),))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("INSERT INTO qa_data (subject, input, output) VALUES (?, ?, ?)", (item[0], item[1], item[2]))
+                conn.commit()
+                
     conn.close()
 
 def get_answer_from_db(query, subject):
-    """Searches SQLite database flexibly."""
-    init_db() # Ensure table and data exist
+    """Performs precise keyword scoring to ensure zero mismatched answers."""
+    init_db()
     db_path = "subject.db"
 
     try:
@@ -45,41 +57,54 @@ def get_answer_from_db(query, subject):
         
         q_clean = query.lower().strip()
         
-        # 1. Exact match on input column
-        cursor.execute("SELECT output FROM qa_data WHERE LOWER(input) = ?", (q_clean,))
+        # 1. Exact match check
+        cursor.execute("SELECT output FROM qa_data WHERE LOWER(input) = ? AND LOWER(subject) LIKE ?", (q_clean, f"%{subject.lower()}%"))
         result = cursor.fetchone()
         if result:
             conn.close()
             return result[0]
             
-        # 2. Substring or keyword search
-        stop_words = ["what", "is", "a", "an", "the", "how", "can", "to", "define", "explain", "tell", "me", "about"]
-        words = [w for w in q_clean.split() if w not in stop_words]
-        
-        search_terms = words if words else [q_clean]
-        for term in search_terms:
-            if len(term) > 1:
-                cursor.execute("SELECT output FROM qa_data WHERE LOWER(input) LIKE ? OR LOWER(output) LIKE ?", (f"%{term}%", f"%{term}%"))
-                result = cursor.fetchone()
-                if result:
-                    conn.close()
-                    return result[0]
-                    
+        # 2. Smart Scoring: Find the database question with the highest keyword overlap
+        cursor.execute("SELECT input, output FROM qa_data WHERE LOWER(subject) LIKE ?", (f"%{subject.lower()}%",))
+        rows = cursor.fetchall()
         conn.close()
+        
+        stop_words = {"what", "is", "a", "an", "the", "how", "can", "to", "define", "explain", "tell", "me", "about", "are", "do", "does"}
+        q_words = set(w for w in q_clean.split() if w not in stop_words)
+        
+        best_match_output = None
+        highest_score = 0
+        
+        for db_input, db_output in rows:
+            db_words = set(w for w in db_input.lower().split() if w not in stop_words)
+            common_words = q_words.intersection(db_words)
+            score = len(common_words)
+            
+            if score > highest_score:
+                highest_score = score
+                best_match_output = db_output
+                
+        if highest_score > 0:
+            return best_match_output
+
     except Exception as e:
-        return f"Database error: {e}"
+        return None
 
     return None
 
 def generate_rag_response(user_prompt, subject):
-    """Fetches database answer and attempts Ollama enhancement, falling back to direct DB text."""
+    """Fetches exact database record and instructs Ollama to be concise and interactive."""
     db_context = get_answer_from_db(user_prompt, subject)
     
-    if db_context and not db_context.startswith("Database"):
+    if db_context:
         prompt = (
-            f"You are Freemium AI, an offline tutor for {subject}. "
-            f"Present the following database record clearly and educationally to the student:\n\n"
-            f"{db_context}"
+            f"You are Freemium AI, a friendly offline tutor for {subject}. "
+            f"The student asked: '{user_prompt}'. "
+            f"Here is the verified database definition: {db_context}\n\n"
+            f"Instructions:\n"
+            f"1. Give a DIRECT, concise, and precise answer based strictly on the definition.\n"
+            f"2. Keep it short (2-3 sentences max) so it's not overwhelming.\n"
+            f"3. End with a friendly, interactive follow-up question asking if they want to explore related topics (like hardware, software, or components)."
         )
         try:
             response = ollama.chat(
@@ -90,7 +115,7 @@ def generate_rag_response(user_prompt, subject):
         except Exception:
             return db_context
     else:
-        return f"I found general notes on **'{user_prompt}'** in our offline curriculum database: A computer processes input data into meaningful output using hardware and software logic."
+        return f"I couldn't find a direct match for **'{user_prompt}'** in our offline database. Try asking about *what is a computer*, *define hardware*, or *what is the CPU*!"
 
 
 # --- 2. Streamlit Page Configuration ---
@@ -201,7 +226,7 @@ if not st.session_state.onboarded:
                 st.session_state.selected_subject = subject_choice.replace(" (Available)", "")
                 st.session_state.onboarded = True
                 
-                welcome_msg = f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\nI am ready. Ask me anything like 'What is a computer?' or 'Define hardware'!"
+                welcome_msg = f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\nI am ready. Try asking about *what is a computer*, *define hardware*, or *what is the CPU*!"
                 
                 st.session_state.messages.append({"role": "assistant", "content": welcome_msg})
                 st.rerun()
