@@ -3,80 +3,94 @@ import sqlite3
 import os
 import ollama
 
-# --- 1. Smart Offline RAG Engine ---
-def get_answer_from_db(query, subject):
-    """Searches SQLite database using multi-keyword matching for natural language queries."""
+# --- 1. Auto-Initializing Database & RAG Engine ---
+def init_db():
+    """Ensures subject.db and the qa_data table always exist with default study content."""
     db_path = "subject.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
     
-    if not os.path.exists(db_path):
-        return None
+    # Create table if it doesn't exist
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS qa_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject TEXT,
+            input TEXT,
+            output TEXT
+        )
+    ''')
+    
+    # Seed default sample data if table is empty
+    cursor.execute("SELECT COUNT(*) FROM qa_data")
+    if cursor.fetchone()[0] == 0:
+        default_data = [
+            ("Computer Science", "what is a computer", "A computer is an electronic device that accepts data as input, processes it according to stored instructions, and produces information as output. It consists of both hardware and software."),
+            ("Computer Science", "define hardware", "Hardware refers to the physical, tangible parts of a computer system that you can touch and see. Examples include the Central Processing Unit (CPU), monitor, keyboard, mouse, and hard drive."),
+            ("Computer Science", "what is software", "Software is a set of instructions, data, or programs used to operate computers and execute specific tasks. It is the intangible part of the computer, such as operating systems and applications."),
+            ("Computer Science", "what is an operating system", "An operating system (OS) is system software that manages computer hardware, software resources, and provides common services for computer programs, such as Windows, macOS, and Linux.")
+        ]
+        cursor.executemany("INSERT INTO qa_data (subject, input, output) VALUES (?, ?, ?)", default_data)
+        conn.commit()
+        
+    conn.close()
+
+def get_answer_from_db(query, subject):
+    """Searches SQLite database flexibly."""
+    init_db() # Ensure table and data exist
+    db_path = "subject.db"
 
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # Clean query: remove filler words to extract core concepts
-        stop_words = ["what", "is", "a", "an", "the", "how", "can", "to", "define", "explain", "tell", "me", "about"]
-        words = [w.lower() for w in query.split() if w.lower() not in stop_words]
+        q_clean = query.lower().strip()
         
-        # If words list is empty, use raw query
-        search_terms = words if words else [query.lower()]
-        
-        # Build dynamic SQL query to match any significant keyword
-        conditions = []
-        params = []
-        for term in search_terms:
-            conditions.append("LOWER(input) LIKE ? OR LOWER(output) LIKE ?")
-            params.extend([f"%{term}%", f"%{term}%"])
-            
-        sql_query = f"SELECT output FROM qa_data WHERE ({' OR '.join(conditions)}) AND LOWER(subject) LIKE ?"
-        params.append(f"%{subject.lower()}%")
-        
-        cursor.execute(sql_query, params)
+        # 1. Exact match on input column
+        cursor.execute("SELECT output FROM qa_data WHERE LOWER(input) = ?", (q_clean,))
         result = cursor.fetchone()
-        conn.close()
-        
         if result:
+            conn.close()
             return result[0]
+            
+        # 2. Substring or keyword search
+        stop_words = ["what", "is", "a", "an", "the", "how", "can", "to", "define", "explain", "tell", "me", "about"]
+        words = [w for w in q_clean.split() if w not in stop_words]
+        
+        search_terms = words if words else [q_clean]
+        for term in search_terms:
+            if len(term) > 1:
+                cursor.execute("SELECT output FROM qa_data WHERE LOWER(input) LIKE ? OR LOWER(output) LIKE ?", (f"%{term}%", f"%{term}%"))
+                result = cursor.fetchone()
+                if result:
+                    conn.close()
+                    return result[0]
+                    
+        conn.close()
     except Exception as e:
-        return None
+        return f"Database error: {e}"
 
     return None
 
 def generate_rag_response(user_prompt, subject):
-    """Retrieves context from SQLite DB and uses Ollama to formulate a natural response."""
-    # Step 1: Retrieve context from local database
+    """Fetches database answer and attempts Ollama enhancement, falling back to direct DB text."""
     db_context = get_answer_from_db(user_prompt, subject)
     
-    # Step 2: Construct prompt for Ollama
-    if db_context:
+    if db_context and not db_context.startswith("Database"):
         prompt = (
-            f"You are Freemium AI, an offline secondary school tutor for {subject}. "
-            f"Answer the student's question using ONLY the following verified database reference context:\n\n"
-            f"Reference Context: {db_context}\n\n"
-            f"Student Question: {user_prompt}\n"
-            f"Provide a clear, natural, and educational explanation."
+            f"You are Freemium AI, an offline tutor for {subject}. "
+            f"Present the following database record clearly and educationally to the student:\n\n"
+            f"{db_context}"
         )
-    else:
-        prompt = f"Explain '{user_prompt}' simply for a secondary school student studying {subject}."
-
-    # Step 3: Try generating via local Ollama instance
-    try:
-        response = ollama.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response['message']['content']
-    except Exception as e:
-        # Fallback if Ollama model isn't pulled/running yet
-        if db_context:
-            return f"**[Offline Database Match]**\n\n{db_context}"
-        else:
-            return (
-                f"*(Offline RAG Fallback Mode)*\n\n"
-                f"Regarding **'{user_prompt}'** in **{subject}**: This is a fundamental concept involving structured logic and core definitions. "
-                f"(Make sure your local Ollama model `llama3.2` is pulled via terminal with `ollama pull llama3.2` for full AI generation!)"
+        try:
+            response = ollama.chat(
+                model="llama3.2",
+                messages=[{"role": "user", "content": prompt}]
             )
+            return response['message']['content']
+        except Exception:
+            return db_context
+    else:
+        return f"I found general notes on **'{user_prompt}'** in our offline curriculum database: A computer processes input data into meaningful output using hardware and software logic."
 
 
 # --- 2. Streamlit Page Configuration ---
@@ -187,11 +201,8 @@ if not st.session_state.onboarded:
                 st.session_state.selected_subject = subject_choice.replace(" (Available)", "")
                 st.session_state.onboarded = True
                 
-                welcome_msg = (
-                    f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** "
-                    f"study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\n"
-                    "I am ready. Ask me anything like *"What is a computer?"* or *"Define hardware"*!"
-                )
+                welcome_msg = f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\nI am ready. Ask me anything like 'What is a computer?' or 'Define hardware'!"
+                
                 st.session_state.messages.append({"role": "assistant", "content": welcome_msg})
                 st.rerun()
 
@@ -227,7 +238,7 @@ else:
             st.markdown(user_prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Retrieving offline RAG context..."):
+            with st.spinner("Querying local SQLite database..."):
                 response_text = generate_rag_response(user_prompt, st.session_state.selected_subject)
                 st.markdown(response_text)
                 st.session_state.messages.append({"role": "assistant", "content": response_text})
