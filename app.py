@@ -93,8 +93,22 @@ def get_answer_from_db(query, subject):
     return None
 
 def generate_rag_response(user_prompt, subject):
-    """Fetches exact database record and instructs Ollama to be concise and interactive."""
-    db_context = get_answer_from_db(user_prompt, subject)
+    """Handles conversational intent mapping, fetches database records, and formats precise AI responses."""
+    q_lower = user_prompt.lower().strip()
+    
+    # Map conversational follow-ups to core database queries
+    if q_lower in ["yes", "yeah", "sure", "yep", "hardware"]:
+        actual_query = "define hardware"
+    elif "software" in q_lower:
+        actual_query = "what is software"
+    elif "cpu" in q_lower:
+        actual_query = "what is the cpu"
+    elif "internet" in q_lower:
+        actual_query = "what is the internet"
+    else:
+        actual_query = user_prompt
+
+    db_context = get_answer_from_db(actual_query, subject)
     
     if db_context:
         prompt = (
@@ -104,7 +118,7 @@ def generate_rag_response(user_prompt, subject):
             f"Instructions:\n"
             f"1. Give a DIRECT, concise, and precise answer based strictly on the definition.\n"
             f"2. Keep it short (2-3 sentences max) so it's not overwhelming.\n"
-            f"3. End with a friendly, interactive follow-up question asking if they want to explore related topics (like hardware, software, or components)."
+            f"3. End with a friendly, interactive follow-up question asking if they want to explore another related topic."
         )
         try:
             response = ollama.chat(
@@ -115,7 +129,7 @@ def generate_rag_response(user_prompt, subject):
         except Exception:
             return db_context
     else:
-        return f"I couldn't find a direct match for **'{user_prompt}'** in our offline database. Try asking about *what is a computer*, *define hardware*, or *what is the CPU*!"
+        return f"I couldn't find a match for **'{user_prompt}'** in our offline database. Try asking about *what is a computer*, *define hardware*, or *what is software*!"
 
 
 # --- 2. Streamlit Page Configuration ---
@@ -226,7 +240,7 @@ if not st.session_state.onboarded:
                 st.session_state.selected_subject = subject_choice.replace(" (Available)", "")
                 st.session_state.onboarded = True
                 
-                welcome_msg = f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\nI am ready. Try asking about *what is a computer*, *define hardware*, or *what is the CPU*!"
+                welcome_msg = f"Hello **{st.session_state.user_name}**! Welcome to your **{st.session_state.selected_subject}** study room for the **{st.session_state.selected_country}** curriculum ({st.session_state.education_level}).\n\nI am ready. Try asking about *what is a computer*, *define hardware*, or *what is software*!"
                 
                 st.session_state.messages.append({"role": "assistant", "content": welcome_msg})
                 st.rerun()
